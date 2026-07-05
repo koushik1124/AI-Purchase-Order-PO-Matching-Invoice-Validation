@@ -1,0 +1,542 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "getAll",
+        "limit": 10,
+        "simple": false,
+        "filters": {
+          "q": "has:attachment filename:pdf subject:(invoice OR PO OR purchase)"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -1296,
+        -160
+      ],
+      "id": "cbc97f2d-d9ca-4a72-8514-71e3df180f10",
+      "name": "Get many messages",
+      "webhookId": "30c158a8-109c-4b07-b599-77e2d065ed5b",
+      "alwaysOutputData": false,
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "OdRPEh6wWD3UA9Nr",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "attachment_0",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -1088,
+        -352
+      ],
+      "id": "8dcfa601-1273-4267-b4da-a15e8547744c",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model:  \"openai/gpt-oss-120b\",\n  messages: [{\n    role: \"user\",\n    content: \"Extract invoice data from the following text and return ONLY valid JSON with keys: vendor_name, vendor_id, po_number, invoice_number, invoice_date, due_date, currency, net_amount, tax_amount, gross_amount, line_items (array of {item, quantity, unit_price, line_total}), confidence_score (0-1), extraction_warnings (array). No markdown, JSON only.\\n\\nInvoice text:\\n\" + $json.text\n  }],\n  response_format: {type: \"json_object\"}\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -864,
+        -144
+      ],
+      "id": "dc7eb0f8-4bc9-4aa5-90b8-11c48684a47a",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "9pBhRLxOdWUFy7gM",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item, i) => {\n  let parsed;\n  try {\n    parsed = JSON.parse(item.json.choices[0].message.content);\n  } catch (e) {\n    parsed = { extraction_error: `Failed to parse Groq output: ${e.message}`, confidence_score: 0 };\n  }\n\n  const emailMeta = $('Get many messages').all()[i]?.json;\n\n  return {\n    json: {\n      ...parsed,\n      sender_email: emailMeta?.from?.value?.[0]?.address ?? null,\n      email_subject: emailMeta?.subject ?? null,\n      received_at: emailMeta?.date ?? null\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        -336
+      ],
+      "id": "53766c60-1265-4f6d-9e4c-6b098b8f609b",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appfhwee5mqQz4f6H",
+          "mode": "list",
+          "cachedResultName": "Task2_PO_Invoice_Matching.",
+          "cachedResultUrl": "https://airtable.com/appfhwee5mqQz4f6H"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl7LBeKcOtt7i262",
+          "mode": "list",
+          "cachedResultName": "Purchase Orders",
+          "cachedResultUrl": "https://airtable.com/appfhwee5mqQz4f6H/tbl7LBeKcOtt7i262"
+        },
+        "filterByFormula": "={PO Number}='{{ $json.po_number }}'",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        -336
+      ],
+      "id": "a8b8fa46-e41b-44bc-96b7-3fc18927406e",
+      "name": "Search records",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "P2mTbRzgD5sNqvHN",
+          "name": "Airtable Personal Access Token account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $('Code in JavaScript').all().map((invItem, i) => {\n  const invoice = invItem.json;\n\n  // If extraction itself failed upstream, short-circuit — don't run comparison on garbage\n  if (invoice.extraction_error) {\n    return {\n      json: {\n        ...invoice,\n        discrepancy_summary: \"Extraction failed — manual review required\",\n        validation_status: \"Procurement Review\"\n      }\n    };\n  }\n\n  const poResults = $('Search records').all();\n  const po = poResults.find(p => p.json[\"PO Number\"] === invoice.po_number)?.json;\n\n  if (!po) {\n    return {\n      json: {\n        ...invoice,\n        discrepancy_summary: \"Missing Purchase Order\",\n        validation_status: \"Rejected\"\n      }\n    };\n  }\n\n  const discrepancies = [];\n  if (invoice.vendor_name !== po.Vendor) discrepancies.push(\"Vendor mismatch\");\n  if (invoice.po_number !== po[\"PO Number\"]) discrepancies.push(\"PO number mismatch\");\n  if (invoice.currency !== po.Currency) discrepancies.push(\"Currency mismatch\");\n\n  let poItems;\n  try {\n    poItems = JSON.parse(po[\"Approved Line Items\"]);\n  } catch (e) {\n    discrepancies.push(\"PO line items unreadable — manual review required\");\n    poItems = [];\n  }\n\n  if (Array.isArray(invoice.line_items)) {\n    invoice.line_items.forEach(li => {\n      const match = poItems.find(p => p.item === li.item);\n      if (!match) {\n        discrepancies.push(`Additional line item: ${li.item}`);\n      } else {\n        if (li.quantity !== match.quantity) discrepancies.push(`Quantity mismatch: ${li.item}`);\n        if (li.unit_price !== match.unit_price) discrepancies.push(`Unit price mismatch: ${li.item}`);\n      }\n    });\n  } else {\n    discrepancies.push(\"Invoice line items missing or malformed\");\n  }\n\n  poItems.forEach(p => {\n    if (!invoice.line_items?.find(i => i.item === p.item)) discrepancies.push(`Missing line item: ${p.item}`);\n  });\n\n  if (typeof invoice.net_amount === 'number' && invoice.net_amount > po[\"Total Amount\"]) {\n    discrepancies.push(\"Invoice total exceeds PO value\");\n  }\n\n  const validation_status = discrepancies.length === 0 ? \"Ready for Payment\"\n    : discrepancies.length <= 2 ? \"Procurement Review\"\n    : \"Rejected\";\n\n  return {\n    json: {\n      ...invoice,\n      discrepancy_summary: discrepancies.join(\"; \") || \"None\",\n      validation_status\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        -336
+      ],
+      "id": "22592994-2d58-4495-9470-0bf41d8445a8",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "appfhwee5mqQz4f6H",
+          "mode": "list",
+          "cachedResultName": "Task2_PO_Invoice_Matching.",
+          "cachedResultUrl": "https://airtable.com/appfhwee5mqQz4f6H"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1S16l5MrL6yN7y",
+          "mode": "list",
+          "cachedResultName": "Invoices",
+          "cachedResultUrl": "https://airtable.com/appfhwee5mqQz4f6H/tbl1S16l5MrL6yN7y"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Vendor": "={{ $json.vendor_name }}",
+            "Vendor ID": "={{ $json.vendor_id }}",
+            "Purchase Order": "={{ $json.po_number }}",
+            "Invoice Number": "={{ $json.invoice_number }}",
+            "Invoice Date": "={{ $json.invoice_date }}",
+            "Due Date": "={{ $json.due_date }}",
+            "Currency": "={{ $json.currency }}",
+            "Net Amount": "={{ $json.net_amount }}",
+            "Tax Amount": "={{ $json.tax_amount }}",
+            "Gross Amount": "={{ $json.gross_amount }}",
+            "Line Items": "={{ JSON.stringify($json.line_items) }}",
+            "Discrepancy Summary": "={{ $json.discrepancy_summary }}",
+            "Confidence Score": "={{ $json.confidence_score }}",
+            "Validation Status": "={{ $json.validation_status }}",
+            "Sender Email": "={{ $json.sender_email }}",
+            "Email Subject": "={{ $json.email_subject }}",
+            "Received At": "={{ $json.received_at }}",
+            "Last Updated": "={{ $json.last_updated }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Invoice Number",
+              "displayName": "Invoice Number",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Vendor",
+              "displayName": "Vendor",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Purchase Order",
+              "displayName": "Purchase Order",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Invoice Date",
+              "displayName": "Invoice Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Currency",
+              "displayName": "Currency",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "INR",
+                  "value": "INR"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Attachments",
+              "displayName": "Attachments",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Vendor ID",
+              "displayName": "Vendor ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Net Amount",
+              "displayName": "Net Amount",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Tax Amount",
+              "displayName": "Tax Amount",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Gross Amount",
+              "displayName": "Gross Amount",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Line Items",
+              "displayName": "Line Items",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Discrepancy Summary",
+              "displayName": "Discrepancy Summary",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Confidence Score",
+              "displayName": "Confidence Score",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Validation Status",
+              "displayName": "Validation Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Ready for Payment",
+                  "value": "Ready for Payment"
+                },
+                {
+                  "name": "Procurement Review",
+                  "value": "Procurement Review"
+                },
+                {
+                  "name": "Rejected",
+                  "value": "Rejected"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Sender Email",
+              "displayName": "Sender Email",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Email Subject",
+              "displayName": "Email Subject",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Received At",
+              "displayName": "Received At",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Last Updated",
+              "displayName": "Last Updated",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [
+        -432,
+        32
+      ],
+      "id": "e3c10a05-3301-4b68-bc68-c8698f0cf01a",
+      "name": "Create a record",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "P2mTbRzgD5sNqvHN",
+          "name": "Airtable Personal Access Token account 2"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1520,
+        -368
+      ],
+      "id": "1ce08c24-fbbe-4403-9d2f-854ea05f053a",
+      "name": "When clicking ‘Execute workflow’"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Get many messages": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Search records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search records": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Create a record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Get many messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "082739e4-ea0f-4b54-b535-04dbbe212777",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "76471e004d558461c017fb5affe8f59a9d6acb0555c50a5ba7e7bddc6b386407"
+  },
+  "id": "V2yuSVH5iBOF3qw2",
+  "tags": []
+}
