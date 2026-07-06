@@ -61,7 +61,7 @@ Extraction prompt sent to Groq (`openai/gpt-oss-120b`, single user message, `res
 
 > Extract invoice data from the following text and return ONLY valid JSON with keys: vendor_name, vendor_id, po_number, invoice_number, invoice_date, due_date, currency, net_amount, tax_amount, gross_amount, line_items (array of {item, quantity, unit_price, line_total}), confidence_score (0-1), extraction_warnings (array). No markdown, JSON only.
 
-**Known limitations in this prompt (not fixed in this submission):**
+**Known limitations in this prompt:**
 - `confidence_score` has no defined rubric — model returned ≥0.99 on every test case, so treat it as unvalidated rather than a real reliability signal.
 - No temperature set (defaults used) — extraction isn't guaranteed deterministic across repeated runs on the same input.
 - No field-format spec (date format, currency notation) — acceptable given clean/consistent test data, untested against varied real-world invoice formatting.
