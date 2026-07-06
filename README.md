@@ -55,6 +55,17 @@ flowchart TD
 
 **Manual review / approval (Steps 8–9)**: handled directly in the Airtable Invoices table interface. Procurement staff can view extracted data and discrepancy summary, then manually edit Validation Status and Reviewer Comments fields to approve, reject, or override. No separate custom review UI was built; Airtable's native grid/record view serves this function.
 
+## Prompt Design
+
+Extraction prompt sent to Groq (`openai/gpt-oss-120b`, single user message, `response_format: json_object`):
+
+> Extract invoice data from the following text and return ONLY valid JSON with keys: vendor_name, vendor_id, po_number, invoice_number, invoice_date, due_date, currency, net_amount, tax_amount, gross_amount, line_items (array of {item, quantity, unit_price, line_total}), confidence_score (0-1), extraction_warnings (array). No markdown, JSON only.
+
+**Known limitations in this prompt (not fixed in this submission):**
+- `confidence_score` has no defined rubric — model returned ≥0.99 on every test case, so treat it as unvalidated rather than a real reliability signal.
+- No temperature set (defaults used) — extraction isn't guaranteed deterministic across repeated runs on the same input.
+- No field-format spec (date format, currency notation) — acceptable given clean/consistent test data, untested against varied real-world invoice formatting.
+
 ## Database Schema
 
 **Purchase Orders**: Vendor, PO Number, Approved Line Items (JSON array string: `[{"item","quantity","unit_price"}]`), Total Amount, Currency, Approval Status.
@@ -66,6 +77,7 @@ flowchart TD
 - **Trigger**: Manual execution used for demo reproducibility. Production implementation would use n8n's Gmail Trigger node (Message Received event) with the same search filter, firing per incoming message. This was built and verified to authenticate and filter correctly, but not adopted for the final submission because it requires reworking the batch-oriented (`.all()[index]`) logic in the Code nodes into single-item-per-execution logic: a change judged too high-risk to make and re-verify within the assignment timeline.
 - **Currency mismatch detection**: implemented in the comparison logic (`invoice.currency !== po.Currency`) but not exercised in testing, since all test data uses a single currency (INR).
 - **Confidence score**: consistently returned ≥0.99 across all test cases in this submission. The low-confidence branch (e.g., routing low-confidence extractions to manual review) is not implemented as a distinct rule and has not been validated against degraded or ambiguous input (poor OCR, missing fields).
+Field comparisons use exact string equality (vendor name, item name, PO number) rather than fuzzy matching — sufficient for this test set but will produce false-positive discrepancies on casing/formatting variance in production data
 - **Email metadata alignment**: sender/subject/date are attached to each invoice by matching array index between the Gmail fetch and the parse step. This is correct as long as no item is silently dropped between those two nodes; it has not been stress-tested against a scenario where PDF extraction or LLM extraction fails for one invoice in a multi-invoice batch.
 - **Duplicate invoice detection**: not implemented. Re-processing the same invoice email would currently create a duplicate record in Airtable.
 - **Invoice Attachment**: not populated. The Airtable Attachments field type only accepts a URL or attachment-array expression in this n8n Airtable node version, not raw binary data directly. A Google Drive upload branch was built and tested as a solution but abandoned: it required a parallel branch off "Extract from File" to preserve binary data, and merging its output (a Drive link) back into the main chain by invoice number required a cross-branch node reference that only resolves reliably after full-workflow execution, with no guaranteed ordering between parallel branches. Production implementation would restructure the chain to carry binary data linearly through to a Drive/S3 upload step before the Airtable write, rather than branching in parallel.
